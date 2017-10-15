@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+## @see https://wiki.alpinelinux.org/wiki/Installing_Alpine_Linux_in_a_chroot
+
+data=/home/distances/src-private/my-dockers/scont/data
+
+_help() {
+    cat <<EOH
+${0##*} - Simple Container
+
+Usage: ${0##*} [options] <app>
+Options:
+    -h|--help       this message
+    -v|--version    show version
+    -a|--app        app name
+    -s|--script     script to execute after installation
+EOH
+    return 0
+}
+[[ -z "$1" ]] && _help && exit 1
+
+## start as root
+((UID)) && exec sudo "$0" "$@"
+
+_umount() {
+    [[ -z "$app" || ! -d "$app"/base ]] && echo "NO" && return 0
+    local appr=$(readlink -f "$app"/base)
+    [[ "$(readlink -f "$appr")" == / ]] && return 0
+    for m in $(cat /proc/mounts | grep "$appr"|awk '{print $2}'); do
+        umount "$m"
+    done
+    umount "$app" 2>/dev/null
+}
+_clean() {
+    [[ -n "$script" ]] && \rm -f "${app}/base/${script}"
+    _umount
+}
+_error() {
+    [[ -n "$1" ]] && echo "$@" >&2
+    _clean
+    exit 1
+}
+_abort() {
+    \rm -rf "$app"
+    _error "$@"
+}
+_break() {
+    _clean
+    _abort
+    exit 1
+}
+trap _break INT
+
+app=
+cmd=
+while (($#)); do
+    case "$1" in
+        -h|--help) _help; exit 0;;
+        -v|--version) _version; exit 0;;
+        -a|--app) app="$1";;
+        -s|--script) script="$2"; shift;;
+        -*) _error "Unknown option: $1";;
+        *)
+            if [[ -z "$app" ]]; then
+                app="$1"
+            else
+                _error "Unknown argument: $1";
+            fi
+            ;;
+    esac
+    shift
+done
+[[ -z "$app" ]] && echo "Missing app name." && _help && exit 1
+[[ -d "$data/$app" ]] && echo "Jail root $app already exits. Aborting." && exit 1
+
+## creat app base root
+app="$data/$app"
+mkdir -p "$app"/{base,user,mount}
+
+## install base system
+tar xf assets/rootfs.tar.xz -C "$app"/base || _abort
+
+## create special devices
+mknod -m 666 "$app"/base/dev/full c 1 7
+mknod -m 666 "$app"/base/dev/ptmx c 5 2
+mknod -m 644 "$app"/base/dev/random c 1 8
+mknod -m 644 "$app"/base/dev/urandom c 1 9
+mknod -m 666 "$app"/base/dev/zero c 1 5
+mknod -m 666 "$app"/base/dev/tty c 5 0
+# or
+#mount -o bind /dev "$app".base/dev
+
+## fill resolv.conf
+echo -e 'nameserver 208.67.222.222\nnameserver 2620:0:ccc::2' > "$app"/base/etc/resolv.conf
+## create root home
+mkdir -p "$app"/base/root
+
+## mount system files
+mount -t proc none ${app}/base/proc || _abort
+mount -o bind /sys ${app}/base/sys || _abort
+
+## create overlays
+## TODO: improve security, eg. add to group scont
+if [[ -n "$SUDO_GID" ]]; then
+    chmod 750 "$app"/user
+    chown :$SUDO_GID "$app"/user
+fi
+## boot
+export HOME=/root
+if [[ -n "$script" ]]; then
+    ! [[ -r "$script" ]] && "Can't read user script '$script'" && _abort
+    cp "$script" "$app"/base/ || _abort
+    cmd="/${script}"
+    if ! chroot ${app}/base ${cmd}; then
+        r=1
+        _abort
+    fi
+else
+    mount -t overlay -o lowerdir="$app"/base,upperdir="$app"/user,workdir="$app"/mount none "$app"/mount || _abort
+    if ! chroot ${app}/mount ${cmd:-/bin/sh -l}; then
+        r=1
+        _abort
+    fi
+fi
+_clean
+exit $r

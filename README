@@ -1,0 +1,7 @@
+Simple containers - scont
+A simple attempt to create a simple container without bloat.
+
+- chroot, bootstrap
+- bind, mount
+- namespaces
+- network netspaces

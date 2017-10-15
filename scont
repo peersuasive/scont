@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+set -o pipefail
+ver=0.1
+data=/home/distances/src-private/my-dockers/scont/data
+ME=scont
+me=`basename "$0"`
+[[ "$me" == $ME ]] && me=
+
+_version() { echo "scont - v${ver}"; }
+
+_help() {
+    cat <<EOH
+Usage: ${0##*/} [OPTIONS] <app> [commands]
+Options:
+    -h|--help       this message
+    -v|--version    show version
+    -a|--app <app>  app to execute
+    -u|--user       user to log in with
+    --uid           use uid
+    --gid           use gid
+    --save          save container into an image
+    --run           keep container "running"
+    --stop          stop container
+    --              end of options
+EOH
+}
+[[ -z "$me" && -z "$1" ]] && _help  && exit 1
+
+((UID)) && exec sudo "$0" "$@"
+[[ -n "$me" ]] && app="$me"
+
+oldIFS=$IFS
+#####################################################################
+
+user_added=0
+_add_user() {
+    _cmd getent group $app_user
+    _cmd getent passwd $app_user
+    _cmd addgroup -g $gid $app_user || _error
+    _cmd adduser -D -G $app_user -u $uid $app_user || _error
+    user_added=1
+}
+_del_user() {
+    ((!user_added||keep_user)) && return 0
+    _cmd deluser --remove-home $app_user || _error
+    _cmd delgroup $app_user 2>/dev/null
+}
+
+_clean() {
+    ((keep)) && return 0
+    [[ -z "$app" || ! -d "$app" ]] && return 0
+    _del_user
+    for m in $(cat /proc/mounts | grep "$(readlink -f "$base")"|awk '{print $2}'); do
+        [[ "$m" == / ]] && continue
+        umount "$m"
+    done
+    for m in $(cat /proc/mounts | grep "$(readlink -f "$workdir")"|awk '{print $2}'); do
+        [[ "$m" == / ]] && continue
+        umount "$m"
+    done
+    for m in $(cat /proc/mounts | grep "$(readlink -f "$app")"|awk '{print $2}'); do
+        [[ "$m" == / ]] && continue
+        umount "$m"
+    done
+}
+_error() {
+    [[ -n "$1" ]] && echo "$@" >&2
+    _clean
+    exit 1
+}
+
+#####################################################################
+
+_geniso() {
+    for req in genisoimage makeself; do
+        ! which $req >/dev/null && _error "Missing requirement: $req"
+    done
+    here="$PWD"
+    \cp "$(readlink -f "$0")" "$app/scont" || _error
+    pushd "$data" >/dev/null
+    if genisoimage --quiet --iso-level 4 -f -o "${here}/${appname}.img" "$app" 2>/dev/null; then
+
+## TODO: check version when executing app
+    cat <<EOR > "${here}/${appname}.sh"
+#!/usr/bin/env bash
+set -x
+me="$appname"
+app="$appname"
+data=/tmp/scont
+EOR
+    cat <<'EOR' >> "${here}/${appname}.sh"
+((UID)) && exec sudo "$0" "$@"
+_error() {
+    [[ -n "$1" ]] && echo "$@" >&2
+    umount "$data/$app" 2>/dev/null
+    exit 1
+}
+EOR
+    cat <<'EOR' >> "${here}/${appname}.sh"
+base="$data/$app/loop/base"
+lowerdir="$data/$app/loop/base"
+upperdir="$data/$app/user"
+workdir="$data/$app/mount"
+home=$(dirname "`readlink -f "$0"`")
+if ! mount | grep -q "$data/$app/loop"; then
+    \rm -rf $data/"$app"
+    mkdir -p "$data/$app"/{user,loop,mount} || _error
+    mount -o loop "$home/$app.img" "$data/$app/loop" 2>/dev/null|| _error
+    \cp -f "$data/$app/loop/scont" "/$data/$app/scont"
+    \cp -f "$data/$app/loop/config" "/$data/$app/config"
+#else
+## TODO: check version in config and warn user in case of difference
+## or, better, name base app according to its version: $app.$ver/{loop,...}
+## ask user if she wants to migrate data from older app
+fi
+exec "$data/$app/scont" --data-dir $data --base "$base" --lower "$lowerdir" --upper "$upperdir" --work "$workdir" "$app" "$@"
+EOR
+    chmod +x "${here}/${appname}.sh"
+    chown $uid:$gid "${here}/${appname}".{sh,img}
+    popd >/dev/null
+    \rm -f "$app/scont"
+        exit 0
+    else
+        _error "Can't create image: $?"
+    fi
+}
+
+_stop() {
+    _clean
+    \rm -rf "$workdir"
+    \rm -rf "$upperdir"
+}
+
+#####################################################################
+declare -A config
+has_command=0
+read_config() {
+    ((${config[LOADED]})) && return 0
+    ## set default values
+    config[CMD]="/bin/sh"
+    if [[ -f $config ]]; then
+        local IFS
+        IFS=$'\n'
+        for l in $(cat "$config"|sed -e '/^#/d;/^\ *$/d;s/\ *#.*$//g'); do
+            IFS=':' read k v <<<$(echo "$l" |sed -e 's/\ *:\ */:/g')
+            k=${k^^}
+            v=${v#\"}; v=${v%\"}; v=${v#\'}; v=${v%\'}
+            config["${k}"]="$v"
+            [[ "$k" == CMD ]] && has_command=1
+        done
+        config[LOADED]=1
+    fi
+}
+
+if [[ -n "$app" && -d "$data/$app" ]]; then
+    config="$data/$app/config"
+    read_config
+    cmd=${config[CMD]}
+    keep=1
+    EOO=1
+fi
+
+user=${user}
+keep_user=${keep_user}
+ignore_cmd=0
+ignore_args=0
+EOO=${EOO}
+intcmd=
+base=
+lowerdir=
+upperdir=
+workdir=
+cenv=()
+keep=${keep}
+while (($#)); do
+    ((EOO)) && { [[ -z "$cmd" ]] && cmd="$1" || ARGS+=( "$1" ); shift; continue; }
+    case "$1" in
+        -h|--help) _help; exit 0;;
+        -v|--version) _version; exit 0;;
+        --real-user) real_user=$2; shift;;
+        --uid) uid=$2; shift;;
+        --gid) gid=$2; shift;;
+        --root) real_user=root; uid=0; gid=0;;
+        --with-chroot) chroot=$2; shift;;
+        -r|--real-user) real_user=${real_user:-$2}; shift;;
+        -u|--user) chroot_user=$2; shift;;
+        -k|--keep-user) keep_user=1;;
+        --save|save) intcmd=geniso;;
+        --data-dir) data="$2"; shift;;
+        --extra-data) EXTRA+=( "$2" ); shift;;
+        --base) base="$2"; shift;;
+        --lower) lowerdir="$2"; shift;;
+        --upper) upperdir="$2"; shift;;
+        --work) workdir="$2"; shift;;
+        --stop|stop) intcmd=stop;;
+        --start|start|--run|run) keep=1;;
+        -I|--ignore-command) ignore_cmd=1; ignore_args=1;;
+        -i|--ignore-args) ignore_args=1;;
+        -e|--env) cenv+=( "$2" ); shift;;
+        --) EOO=1;;
+        -*) _error "Unknown option: $1";;
+        *) 
+            EOO=1
+            if [[ -z "$app" ]]; then
+                app="$1"
+            elif [[ -z "$cmd" ]]; then
+                cmd="$1"
+            else
+                ARGS+=( "$1" )
+            fi
+          ;;
+    esac
+    shift
+done
+appname="$app"
+app="$data/$app"
+! [[ -d "$app" ]] && _error "Can't open scont app '$app'."
+
+uid=${uid:-$SUDO_UID}
+gid=${gid:-$SUDO_GID}
+real_user=${real_user:-$SUDO_USER}
+
+uid=${uid:-`id -u $real_user 2>/dev/null`} || _error "Error with user $real_user."
+gid=${gid:-`id -g $real_user 2>/dev/null`} || _error "Error with user $real_user."
+
+base=${base:-"$app/base"}; base=$(readlink -f "$base")
+lowerdir=${lowerdir:-"$base"} 
+upperdir=${upperdir:-"$app/user"}
+workdir=${workdir:-"$app/work"}; workdir=$(readlink -f "$workdir")
+
+## param = value
+
+case $intcmd in
+    geniso) _geniso; exit 0;;
+    stop) _stop; exit 0;;
+esac
+
+config="$app/config"
+read_config
+((ignore_cmd)) && cmd="$cmd" || { _a1="$cmd"; cmd=${config[CMD]}; }
+[[ -z "$cmd" ]] && _error "No command provided."
+[[ -n "${config[ARGS]}" ]] && !((ignore_args)) && { ARGS=( "${config[ARGS]}" ); _a1=""; }
+set -- $_a1 "${ARGS[@]}"
+
+#####################################################################
+
+## mounted partitions, in case of restart
+declare -A mounted
+for p in $(cat /proc/mounts | grep "$(readlink -f "$app")"|awk '{print $2}'); do
+    mounted["$p"]=1
+done
+!((${mounted["$base/proc"]})) && { mount -t proc none "$base"/proc || _error; }
+!((${mounted["$base/sys"]})) && { mount -o bind /sys "$base"/sys || _error; }
+
+if !(( ${mounted["$workdir"]} )); then
+    [[ ! -d "$upperdir" ]] && mkdir -p "$upperdir" 2>/dev/null
+    [[ ! -d "$workdir" ]] && mkdir -p "$workdir" 2>/dev/null
+    mount -t overlay -o lowerdir=$lowerdir,upperdir=$upperdir,workdir=$workdir none "$workdir" || _error
+fi
+
+_cmd() {
+    chroot "$workdir" "$@"
+}
+
+app_user=$real_user
+if [[ -n "$chroot_user" ]]; then
+    app_user=$chroot_user
+    if _cmd getent passwd $app_user >/dev/null; then
+        uid=$(_cmd id -u $app_user) || _error
+        gid=$(_cmd id -g $app_user) || _error
+    else
+        _add_user
+    fi
+    HOME=/home/$app_user
+elif [[ "$app_user" == root ]]; then
+    HOME=/root
+else
+    HOME=/
+fi
+unset SUDO_COMMAND
+unset SUDO_USER
+unset SUDO_UID
+unset SUDO_GID
+unset XAUTHORITY
+unset DISPLAY
+export USER=$app_user
+export USERNAME=$app_user
+export HOME
+
+chroot --userspec=${uid}:${gid} "$workdir" env -i HOME=$HOME USERNAME=$USERNAME USER=$USER UID=$uid $GROUPS=$gid ${cenv[@]} "$cmd" "$@"
+r=$?
+_clean
+exit $r
