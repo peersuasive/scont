@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ## @see https://wiki.alpinelinux.org/wiki/Installing_Alpine_Linux_in_a_chroot
 
-data=/home/distances/src-private/my-dockers/scont/data
+data=${SCONT_DATA:-/var/lib/scont}
 
 _help() {
     cat <<EOH
