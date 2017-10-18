@@ -56,7 +56,7 @@ while (($#)); do
     case "$1" in
         -h|--help) _help; exit 0;;
         -v|--version) _version; exit 0;;
-        -a|--app) app="$1";;
+        -a|--app) app="$2"; shift;;
         -s|--script) script="$2"; shift;;
         -*) _error "Unknown option: $1";;
         *)
