@@ -77,6 +77,12 @@ app="$data/$app"
 mkdir -p "$app"/{base,user,mount}
 
 ## install base system
+rootfs=assets/rootfs.tar.xz
+[[ -f $rootfs ]] || {
+    mkdir -p assets
+    wget 'https://github.com/yikaus/docker-alpine-base/blob/master/rootfs.tar.xz?raw=true' -O $rootfs \
+        || _error "Can't retrieve $rootfs"
+}
 tar xf assets/rootfs.tar.xz -C "$app"/base || _abort
 
 ## create special devices
