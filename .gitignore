@@ -1,0 +1,4 @@
+.*.sw*
+*~
+assets/rootfs.tar.xz
+local/
